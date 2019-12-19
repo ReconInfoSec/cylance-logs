@@ -1,0 +1,22 @@
+[Unit]
+Description=cylance-logging
+After=multi-user.target
+
+[Service]
+Type=idle
+Environment="APP_ID="
+Environment="APP_SECRET="
+Environment="TENANT_ID="
+Environment="REGION_CODE=na"
+
+WorkingDirectory=/opt/cylance-logging
+ExecStart=/usr/bin/python app.py runserver
+
+# Connects standard output to /dev/null
+StandardOutput=journal
+
+# Connects standard error to journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
