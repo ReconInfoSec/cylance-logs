@@ -1,5 +1,6 @@
 jwt
 PyJWT
-flask
+Flask==2.0.3
 config
+uuid
 requests

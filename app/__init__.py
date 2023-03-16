@@ -1,65 +1,129 @@
-from __future__ import print_function
-from __future__ import unicode_literals
-
-import sys
 import requests
 import json
 import time
-import os
-import uuid
-import logging
-from cypyapi import CyPyAPI
-from flask import Flask, Response, render_template, request, flash, redirect, url_for
+from datetime import datetime, timedelta
+import jwt 
+import uuid 
+from flask import Flask
 from config import Config
-import threading
-import datetime
+
 
 app = Flask(__name__)
+
+# Populate config.py with Cylance credentials
 app.config.from_object(Config)
 
-def get_threats():
+# Cylance API configuration
+APP_ID = app.config['APP_ID']
+TENANT_ID = app.config['TENANT_ID']
+APP_SECRET = app.config['APP_SECRET']
+LOG_FILE_PATH = app.config['LOG_FILE_PATH']
 
-    # Timer
-    threading.Timer(60.0, get_threats).start() # called every minute
+# If your region code is different, your base URLs may be different
+CYLANCE_API_AUTH_ENDPOINT = f'https://protectapi.cylance.com/auth/v2/token'
+CYLANCE_API_DETECTIONS_ENDPOINT = f'https://protectapi.cylance.com/detections/v2?start={{start_time}}&end={{end_time}}'
+CYLANCE_API_DETECTION_ENDPOINT = f'https://protectapi.cylance.com/detections/v2/{{detection_id}}/details'
 
-    # Configure logging
-    logging.basicConfig(filename=app.config['LOG_FILE'], filemode='a', format='%(message)s', level=logging.INFO)
 
-    # Configure API
-    api = CyPyAPI(app.config['TENANT_ID'], app.config['APP_ID'], app.config['APP_SECRET'], app.config['REGION_CODE'])
+def get_access_token(timeout=1800):
 
-    threats = api.get_threats(0,200)
+    # Token expiry 
+    now_utc = datetime.utcnow()
+    timeout_datetime = now_utc + timedelta(seconds=timeout)
+    epoch_time = int((now_utc - datetime(1970, 1, 1)).total_seconds())
+    timeout = int((timeout_datetime - datetime(1970, 1, 1)).total_seconds())
 
-    for threat in threats:
+    # Token UUID
+    jti_val = str(uuid.uuid4())
 
-        creation = datetime.datetime.strptime(threat['last_found'].split('.')[0], '%Y-%m-%dT%H:%M:%S')
+    # JWT request claims
+    claims = {
+        'exp': timeout,
+        'iat': epoch_time,
+        'iss': 'http://cylance.com',  # Issuer 
+        'sub': APP_ID,
+        'tid': TENANT_ID,
+        'jti': jti_val  
+    }
 
-        if (datetime.datetime.utcnow() - creation).days < 1 and (datetime.datetime.utcnow() - creation).seconds <= 60 and not threat['safelisted']:
-           logging.info(json.dumps(threat))
+    # Encode the request with JWT
+    encoded_req = jwt.encode(claims, APP_SECRET, algorithm='HS256')
 
-    return "Cylance Threat Logs Fetched"
+    payload = {'auth_token': str(encoded_req)}
+    
+    headers = {'Content-Type': 'application/json; charset=utf-8'}
+    
+    response = requests.post(str(CYLANCE_API_AUTH_ENDPOINT), headers=headers, data=json.dumps(payload))
+  
+    return json.loads(response.content)['access_token']
+    
 
-def get_detections():
+def get_detections(access_token, start_time, end_time):
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {access_token}',
+        'User-Agent': 'cypyapi'
+    }
 
-    # Timer
-    threading.Timer(60.0, get_detections).start() # called every minute
+    endpoint_url = CYLANCE_API_DETECTIONS_ENDPOINT.format(start_time=start_time,end_time=end_time)
 
-    # Configure logging
-    logging.basicConfig(filename=app.config['LOG_FILE'], filemode='a', format='%(message)s', level=logging.INFO)
+    params = {
+        'page': 1,
+        'page_size': 200
+    }
 
-    # Configure API
-    api = CyPyAPI(app.config['TENANT_ID'], app.config['APP_ID'], app.config['APP_SECRET'], app.config['REGION_CODE'])
+    response = requests.get(endpoint_url, headers=headers, params=params)
+    response.raise_for_status()
 
-    detections = api.get_detections(0,200)
+    response_data = response.json()
+    return response_data['page_items']
 
-    for detection in detections:
 
-        creation = datetime.datetime.strptime(detection['ReceivedTime'].split('.')[0], '%Y-%m-%dT%H:%M:%S')
+def get_detection(access_token, id):
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {access_token}',
+        'User-Agent': 'cypyapi'
+    }
 
-        if (datetime.datetime.utcnow() - creation).days < 1 and (datetime.datetime.utcnow() - creation).seconds <= 60:
-            logging.info(json.dumps(detection))
+    endpoint_url = CYLANCE_API_DETECTION_ENDPOINT.format(detection_id=id)
 
-    return "Cylance Detection Logs Fetched"
+    params = {
+        'page': 1,
+        'page_size': 200
+    }
 
-get_threats()
-get_detections()
+    response = requests.get(endpoint_url, headers=headers, params=params)
+    response.raise_for_status()
+
+    response_data = response.json()
+    return response_data
+
+
+def write_to_log_file(data):
+    with open(LOG_FILE_PATH, 'a') as log_file:
+        log_file.write(json.dumps(data) + '\n')
+        
+
+while True:
+    
+    # Get access token 
+    access_token = get_access_token()
+    
+    # Get start/end times for 2 minute intervals
+    end_time = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+    start_time = (datetime.utcnow() - timedelta(minutes=2)).replace(microsecond=0).isoformat() + 'Z'
+
+    # Get detections and detection details for the past 2 minutes every 2 minutes and write to log file
+    try:
+        detections = get_detections(access_token, start_time, end_time)
+        for detection in detections:
+            detection_details = get_detection(access_token, detection["Id"])
+            write_to_log_file(detection_details)
+
+    except Exception as e:
+
+        with open(LOG_FILE_PATH, 'a') as log_file:
+            log_file.write(f'Error: {str(e)}\n')
+            
+    time.sleep(120) # Wait for 2 minutes before fetching data again

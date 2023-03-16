@@ -1,5 +1,5 @@
 [Unit]
-Description=cylance-logging
+Description=Cylance Detections
 After=multi-user.target
 
 [Service]
@@ -7,10 +7,9 @@ Type=idle
 Environment="APP_ID="
 Environment="APP_SECRET="
 Environment="TENANT_ID="
-Environment="REGION_CODE=na"
 
-WorkingDirectory=/opt/cylance-logging
-ExecStart=/usr/bin/python app.py runserver
+WorkingDirectory=/opt/cylance-logs
+ExecStart=/usr/bin/python3 app.py runserver
 
 # Connects standard output to /dev/null
 StandardOutput=journal
